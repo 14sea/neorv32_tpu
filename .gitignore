@@ -30,8 +30,7 @@ quartus/*.pin
 quartus/*.jdi
 quartus/greybox_tmp/
 
-# NEORV32 submodule (large, external)
-neorv32/
+# NEORV32 is tracked as a submodule
 
 # Simulation outputs
 sim/*.vvp
