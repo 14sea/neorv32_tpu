@@ -10,6 +10,7 @@ The NPU is memory-mapped on the Wishbone (XBUS) bus and accessible from Linux us
 |-------|--------|
 | Phase 1: Bare-metal NEORV32 + TPU | ✅ 21/21 tests passed |
 | Phase 2: Linux + /dev/npu driver  | ✅ 4/4 tests passed |
+| Phase 2: MNIST inference on NPU   | ✅ 3/3 correct (labels 7, 2, 1) |
 
 ## Resource Usage (EP4CE6, 50 MHz)
 
@@ -67,6 +68,24 @@ The kernel driver (`kernel/neorv32_npu.c`) provides a misc char device with ioct
 #define NPU_CLEAR         _IO('N', 4)                       /* reset accumulators */
 ```
 
+## MNIST Inference
+
+3-layer INT8 quantized MLP (784 → 128 → 64 → 10) running on the NPU via `/dev/npu` ioctl. The `mnist` shell command performs tiled 4×4 matrix multiplication across all layers with bias, ReLU, and INT8 requantization.
+
+Weights are generated from the `tpu_demo/` trained model by `sw/initramfs/gen_weights.py` and embedded in the initramfs binary.
+
+```
+npu# mnist
+
+=== MNIST Inference (3-layer MLP on NPU) ===
+
+Sample 0 (label=7): predicted=7 [CORRECT]
+Sample 1 (label=2): predicted=2 [CORRECT]
+Sample 2 (label=1): predicted=1 [CORRECT]
+
+=== MNIST: 3/3 correct ===
+```
+
 ## Build & Run
 
 ### Prerequisites
@@ -88,6 +107,7 @@ python3 host/boot_linux.py --port /dev/ttyUSB0 --skip-program
 
 # At the npu# prompt:
 npu     # runs 4 NPU hardware tests
+mnist   # runs MNIST inference (3 samples)
 ```
 
 ### Full Build
@@ -118,7 +138,7 @@ vvp tb_tpu_accel   # 16/16 tests pass
 1. **NEORV32 bootloader** (ROM, 19200 baud) → uploads stage2_loader
 2. **Stage2 loader** (IMEM, 115200 baud) → xmodem kernel+DTB+initramfs to SDRAM, CRC-32 verify
 3. **Linux kernel** boots from SDRAM (0x40000000), ~132s to shell
-4. **Mini shell** with `npu` command for hardware NPU test
+4. **Mini shell** with `npu` (driver test) and `mnist` (inference) commands
 
 ## Directory Structure
 
@@ -142,7 +162,9 @@ neorv32_tpu/
 ├── sw/
 │   ├── tpu_test/           — Phase 1 bare-metal test firmware
 │   ├── stage2_loader/      — Bootloader stage2 (xmodem receiver)
-│   ├── initramfs/          — Linux init with npu test command
+│   ├── initramfs/          — Linux init with npu + mnist commands
+│   │   ├── gen_weights.py  — Generates mnist_data.h from tpu_demo weights
+│   │   └── mnist_data.h    — INT8 weights/biases/test samples (generated)
 │   └── npu_test/           — Standalone userspace NPU test (libc)
 ├── quartus/                — Quartus project
 ├── sim/                    — Verilog testbenches

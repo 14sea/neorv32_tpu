@@ -75,6 +75,7 @@ my_syscall4(long n, long a0, long a1, long a2, long a3) {
 
 /* NPU ioctl structures (must match driver) */
 typedef signed char int8_t;
+typedef unsigned char uint8_t;
 typedef int int32_t;
 typedef unsigned int uint32_t;
 
@@ -408,11 +409,146 @@ static void cmd_npu(void) {
     my_puts(" ===\n\n");
 }
 
+/* ── MNIST Inference ───────────────────────────────────────────────── */
+
+#include "mnist_data.h"
+
+/* Temporary buffers for inference (static to avoid stack overflow) */
+static int8_t  infer_input[784];
+static int8_t  infer_output[128];  /* max dim */
+static int32_t infer_acc[128];     /* max dim, int32 for last layer */
+
+static void cmd_mnist(void) {
+    int s, correct = 0;
+
+    my_puts("\n=== MNIST Inference (3-layer MLP on NPU) ===\n\n");
+
+    if (npu_open() < 0) return;
+
+    for (s = 0; s < NUM_SAMPLES; s++) {
+        int si = test_sample_indices[s];
+        int label = test_labels[si];
+        const uint8_t *pixels = get_test_sample(s);
+        int8_t *cur_in;
+        int cur_in_dim;
+        int layer, g, t, i;
+
+        my_puts("Sample "); my_putnum(s);
+        my_puts(" (label="); my_putnum(label); my_puts("): ");
+
+        /* Quantize input: uint8 [0,255] → int8 [0,127] */
+        for (i = 0; i < 784; i++)
+            infer_input[i] = (int8_t)(pixels[i] >> 1);
+
+        cur_in = infer_input;
+        cur_in_dim = 784;
+
+        /* Run 3 layers */
+        for (layer = 0; layer < NUM_LAYERS; layer++) {
+            const layer_dims_t *ld = &layer_dims[layer];
+            const int8_t *weights = get_layer_weights(layer);
+            const int32_t *bias = get_layer_bias(layer);
+            int n_out_groups = ld->out_dim_pad / 4;
+            int n_in_tiles = ld->in_dim_pad / 4;
+            int is_last = (layer == NUM_LAYERS - 1);
+
+            for (g = 0; g < n_out_groups; g++) {
+                struct npu_weights wt;
+                struct npu_compute comp;
+                struct npu_result result;
+                int32_t acc[4];
+
+                /* Clear accumulators */
+                my_ioctl(npu_fd, NPU_CLEAR, 0);
+
+                /* Tile over input dimension */
+                for (t = 0; t < n_in_tiles; t++) {
+                    /* Load 4×4 weight tile: W[g*4..g*4+3][t*4..t*4+3] */
+                    int row, col;
+                    for (row = 0; row < 4; row++)
+                        for (col = 0; col < 4; col++)
+                            wt.w[row][col] = weights[(g*4 + row) * ld->in_dim_pad + t*4 + col];
+
+                    my_ioctl(npu_fd, NPU_LOAD_WEIGHTS, &wt);
+
+                    /* Load 4 input values */
+                    for (i = 0; i < 4; i++) {
+                        int idx = t * 4 + i;
+                        comp.x[i] = (idx < cur_in_dim) ? cur_in[idx] : 0;
+                    }
+
+                    my_ioctl(npu_fd, NPU_COMPUTE, &comp);
+                }
+
+                /* Read accumulated results */
+                my_ioctl(npu_fd, NPU_GET_RESULT, &result);
+
+                /* Add bias */
+                for (i = 0; i < 4; i++)
+                    acc[i] = result.res[i] + bias[g * 4 + i];
+
+                if (is_last) {
+                    /* Last layer: keep int32 scores */
+                    for (i = 0; i < 4; i++) {
+                        int idx = g * 4 + i;
+                        if (idx < ld->out_dim)
+                            infer_acc[idx] = acc[i];
+                    }
+                } else {
+                    /* Requantize + ReLU → int8 */
+                    for (i = 0; i < 4; i++) {
+                        int idx = g * 4 + i;
+                        int32_t val = (acc[i] * ld->requant_mult) >> 16;
+                        if (ld->has_relu && val < 0) val = 0;
+                        if (val > 127) val = 127;
+                        if (val < -128) val = -128;
+                        if (idx < ld->out_dim)
+                            infer_output[idx] = (int8_t)val;
+                    }
+                }
+            }
+
+            if (!is_last) {
+                /* Copy output to input for next layer */
+                for (i = 0; i < ld->out_dim; i++)
+                    infer_input[i] = infer_output[i];
+                cur_in = infer_input;
+                cur_in_dim = ld->out_dim;
+            }
+        }
+
+        /* Find argmax of int32 scores */
+        {
+            int pred = 0;
+            int32_t max_val = infer_acc[0];
+            for (i = 1; i < layer_dims[NUM_LAYERS-1].out_dim; i++) {
+                if (infer_acc[i] > max_val) {
+                    max_val = infer_acc[i];
+                    pred = i;
+                }
+            }
+
+            my_puts("predicted="); my_putnum(pred);
+            if (pred == label) {
+                my_puts(" [CORRECT]\n");
+                correct++;
+            } else {
+                my_puts(" [WRONG, expected="); my_putnum(label); my_puts("]\n");
+            }
+        }
+    }
+
+    my_puts("\n=== MNIST: "); my_putnum(correct);
+    my_puts("/"); my_putnum(NUM_SAMPLES);
+    my_puts(" correct ===\n\n");
+}
+
 static void cmd_help(void) {
     my_puts("Commands:\n");
     my_puts("  uname  - kernel info\n");
     my_puts("  info   - memory & uptime\n");
     my_puts("  npu    - test NPU (4x4 systolic array)\n");
+    my_puts("  mnist  - run MNIST inference on NPU\n");
     my_puts("  help   - this message\n");
     my_puts("  exit   - halt system\n");
 }
@@ -432,7 +568,7 @@ void _start(void) {
     my_puts("========================================\n");
     cmd_uname();
     cmd_info();
-    my_puts("\nType 'help' for commands. 'npu' to test.\n\n");
+    my_puts("\nType 'npu' to test, 'mnist' for inference.\n\n");
 
     for (;;) {
         my_puts("npu# ");
@@ -445,6 +581,7 @@ void _start(void) {
         if (my_strcmp(buf, "uname") == 0) cmd_uname();
         else if (my_strcmp(buf, "info") == 0) cmd_info();
         else if (my_strcmp(buf, "npu") == 0) cmd_npu();
+        else if (my_strcmp(buf, "mnist") == 0) cmd_mnist();
         else if (my_strcmp(buf, "help") == 0) cmd_help();
         else if (my_strcmp(buf, "exit") == 0) break;
         else { my_puts("unknown: "); my_puts(buf); my_puts("\n"); }
