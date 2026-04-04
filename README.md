@@ -16,15 +16,15 @@ The NPU is memory-mapped on the Wishbone (XBUS) bus and accessible from Linux us
 
 | Resource | Used | Available | Utilization |
 |----------|------|-----------|-------------|
-| Logic Elements | 5,885 | 6,272 | 94% |
-| Memory bits | 168,960 | 276,480 | 61% |
+| Logic Elements | 5,590 | 6,272 | 89% |
+| Memory bits | 166,912 | 276,480 | 60% |
 | DSP 9-bit elements | 12 | 30 | 40% |
 
 ## Architecture
 
 ```
 ax301_top.vhd
-├── neorv32_top (RV32IMAC, U-mode, Zaamo, Zalrsc, I/D-cache)
+├── neorv32_top (RV32IMAC, U-mode, Zaamo, Zalrsc, I-cache)
 │   ├── IMEM 8 KB (stage2 bootloader)
 │   ├── DMEM 8 KB
 │   ├── UART0 (19200 bootloader / 115200 app)
@@ -208,6 +208,6 @@ Test 4: Accumulation (two MACs)
 
 1. **Stage2 loader must be built against this project's NEORV32** — the `neorv32/` subdir has a different commit than `see_neorv32_run_linux/neorv32/`. Using the wrong stage2 causes `ERROR_SIGNATURE` from the bootloader.
 2. **Init must mount devtmpfs and proc** — `/dev/npu` is created by devtmpfs but only visible after mounting. `/proc/misc` is needed to find the dynamic minor number for mknod fallback.
-3. **94% LE utilization** — very tight. Adding features may require removing caches or using a larger FPGA.
+3. **89% LE utilization** — D-cache disabled to save ~300 LEs. CPU_FAST_MUL_EN cannot be used due to EP4CE6 DSP placement limits (12 PE + 8 CPU MUL > physical capacity). Zicntr must stay enabled — stage2_loader uses `neorv32_cpu_get_cycle()` for timeouts.
 4. **Timing slack -0.976 ns** — fails slow-corner STA but passes fast-corner (+0.640 ns). Same pattern as the Linux-only project (-0.583 ns) which works reliably on hardware.
 5. **DSP placement** — 12 of 16 PEs use DSP blocks; 4 PEs in column 3 are forced to LUT multipliers due to EP4CE6 physical placement constraints.

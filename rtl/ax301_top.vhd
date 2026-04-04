@@ -178,7 +178,7 @@ begin
     RISCV_ISA_U      => true,    -- U-mode for Linux userspace
     RISCV_ISA_Zaamo  => true,    -- atomic AMO instructions
     RISCV_ISA_Zalrsc => true,    -- LR/SC instructions
-    RISCV_ISA_Zicntr => true,
+    RISCV_ISA_Zicntr => true,   -- needed by stage2_loader (neorv32_cpu_get_cycle)
     -- Internal memories (8 KB IMEM for stage2 loader)
     IMEM_EN          => true,
     IMEM_SIZE        => 8*1024,
@@ -192,7 +192,7 @@ begin
     ICACHE_EN        => true,
     CACHE_BLOCK_SIZE => 64,     -- 16 words per cache line
     CACHE_BURSTS_EN  => false,   -- sdram_ctrl does individual word reads
-    DCACHE_EN        => true,
+    DCACHE_EN        => false,   -- disabled to save ~300 LEs (data goes direct to SDRAM)
     -- Peripherals
     IO_GPIO_NUM      => 4,
     IO_CLINT_EN      => true,

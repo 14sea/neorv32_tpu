@@ -137,12 +137,9 @@ set_location_assignment PIN_R11 -to S_DB[15]
 set_instance_assignment -name CURRENT_STRENGTH_NEW 8MA -to S_*
 set_instance_assignment -name FAST_OUTPUT_REGISTER ON  -to S_*
 
-# ── DSP: enable globally for PE multipliers ─────────────────────────────────
-# 14 of 16 PEs use DSP blocks; 2 PEs forced to LUT to avoid placement failure
-# (EP4CE6 cannot physically place all 16 DSP blocks alongside 26 M9K blocks)
+# ── DSP: 12 PE multipliers use DSP blocks ────────────────────────────────────
+# 4 PEs (column 3) forced to LUT — EP4CE6 DSP placement limit with 27 M9K blocks.
 set_global_assignment -name AUTO_DSP_RECOGNITION ON
-
-# Force 4 PEs (column 3) to LUT multipliers to relieve DSP placement pressure
 set_instance_assignment -name DSP_BLOCK_BALANCING "LOGIC ELEMENTS" -to "wb_tpu_accel:wb_tpu_inst|tpu_accel:u_tpu|systolic_array_4x4:sa_inst|pe:pe_0_3"
 set_instance_assignment -name DSP_BLOCK_BALANCING "LOGIC ELEMENTS" -to "wb_tpu_accel:wb_tpu_inst|tpu_accel:u_tpu|systolic_array_4x4:sa_inst|pe:pe_1_3"
 set_instance_assignment -name DSP_BLOCK_BALANCING "LOGIC ELEMENTS" -to "wb_tpu_accel:wb_tpu_inst|tpu_accel:u_tpu|systolic_array_4x4:sa_inst|pe:pe_2_3"
