@@ -18,8 +18,8 @@ module pe (
 
     reg signed [7:0] w_reg;
 
-    // Use DSP blocks for 8×8 multiply (1 multiplier element per PE, 16 total)
-    wire signed [15:0] product = w_reg * x_in;
+    // Force DSP block for 8×8 signed multiply
+    (* multstyle = "dsp" *) wire signed [15:0] product = w_reg * x_in;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
