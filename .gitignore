@@ -1,0 +1,44 @@
+# Build outputs (can be regenerated)
+output/
+sw/initramfs/init
+sw/initramfs/gen_init_cpio
+sw/initramfs/filelist.txt
+sw/initramfs/neo_initramfs.cpio.gz
+sw/stage2_loader/build/
+sw/stage2_loader/main.elf
+sw/stage2_loader/neorv32_exe.bin
+sw/tpu_test/build/
+sw/tpu_test/main.elf
+sw/tpu_test/neorv32_exe.bin
+sw/npu_test/npu_test
+
+# Quartus generated files
+quartus/db/
+quartus/incremental_db/
+quartus/output_files/
+quartus/*.sof
+quartus/*.done
+quartus/*.qws
+quartus/*.rpt
+quartus/*.summary
+quartus/*.sta.*
+quartus/*.fit.*
+quartus/*.map.*
+quartus/*.asm.*
+quartus/*.flow.*
+quartus/*.pin
+quartus/*.jdi
+quartus/greybox_tmp/
+
+# NEORV32 submodule (large, external)
+neorv32/
+
+# Simulation outputs
+sim/*.vvp
+sim/*.vcd
+sim/tb_*[!.v]
+
+# Misc
+*.bak
+*.swp
+*~
