@@ -38,6 +38,25 @@ my_syscall4(long n, long a0, long a1, long a2, long a3) {
     return _a0;
 }
 
+/* 6-arg syscall for mmap2 */
+static inline __attribute__((always_inline)) long
+my_syscall6(long n, long a0, long a1, long a2, long a3, long a4, long a5) {
+    register long _a7 __asm__("a7") = n;
+    register long _a0 __asm__("a0") = a0;
+    register long _a1 __asm__("a1") = a1;
+    register long _a2 __asm__("a2") = a2;
+    register long _a3 __asm__("a3") = a3;
+    register long _a4 __asm__("a4") = a4;
+    register long _a5 __asm__("a5") = a5;
+    __asm__ volatile(
+        "ecall"
+        : "+r"(_a0)
+        : "r"(_a1), "r"(_a2), "r"(_a3), "r"(_a4), "r"(_a5), "r"(_a7)
+        : "memory", "t0", "t1", "t2", "t3", "t4", "t5", "t6"
+    );
+    return _a0;
+}
+
 /* syscall numbers (RISC-V 32) */
 #define __NR_openat     56
 #define __NR_close      57
@@ -47,6 +66,8 @@ my_syscall4(long n, long a0, long a1, long a2, long a3) {
 #define __NR_mknodat    33
 #define __NR_mount      40
 #define __NR_exit       93
+#define __NR_mmap2      222
+#define __NR_munmap     215
 #define __NR_uname      160
 #define __NR_sysinfo    179
 
@@ -88,6 +109,36 @@ struct npu_result  { int32_t res[4]; };
 #define NPU_COMPUTE       _IOW(NPU_IOC_MAGIC, 2, struct npu_compute)
 #define NPU_GET_RESULT    _IOR(NPU_IOC_MAGIC, 3, struct npu_result)
 #define NPU_CLEAR         _IO(NPU_IOC_MAGIC, 4)
+
+/* mmap constants */
+#define PROT_READ       1
+#define PROT_WRITE      2
+#define MAP_SHARED      1
+#define MAP_FAILED      ((void *)-1)
+
+/* TPU register offsets (for mmap direct access) */
+#define TPU_CTRL      0x00
+#define TPU_STATUS    0x04
+#define TPU_W_ADDR    0x08
+#define TPU_W_DATA    0x0C
+#define TPU_X_IN      0x10
+#define TPU_W_DATA4   0x14
+#define TPU_RES0      0x20
+#define TPU_RES1      0x24
+#define TPU_RES2      0x28
+#define TPU_RES3      0x2C
+
+#define CTRL_START    (1 << 0)
+#define CTRL_CLEAR    (1 << 4)
+
+static volatile uint32_t *npu_regs;  /* mmap'd TPU registers */
+
+static inline void npu_reg_write(int offset, uint32_t val) {
+    npu_regs[offset / 4] = val;
+}
+static inline uint32_t npu_reg_read(int offset) {
+    return npu_regs[offset / 4];
+}
 
 struct utsname {
     char sysname[65];
@@ -292,6 +343,20 @@ static int npu_open(void) {
             return -1;
         }
     }
+    /* mmap TPU registers for direct userspace access */
+    if (!npu_regs) {
+        unsigned long ret = (unsigned long)my_syscall6(__NR_mmap2, 0, 4096,
+                               PROT_READ | PROT_WRITE, MAP_SHARED,
+                               npu_fd, 0);
+        /* Kernel error codes are 0xFFFFF000..0xFFFFFFFF (-4096..-1) */
+        if (ret >= 0xFFFFF000UL) {
+            my_puts("  WARNING: mmap failed (err=");
+            my_putint((int)(long)ret);
+            my_puts("), using ioctl fallback\n");
+        } else {
+            npu_regs = (volatile uint32_t *)ret;
+        }
+    }
     return 0;
 }
 
@@ -453,39 +518,65 @@ static void cmd_mnist(void) {
             int is_last = (layer == NUM_LAYERS - 1);
 
             for (g = 0; g < n_out_groups; g++) {
-                struct npu_weights wt;
-                struct npu_compute comp;
-                struct npu_result result;
                 int32_t acc[4];
 
-                /* Clear accumulators */
-                my_ioctl(npu_fd, NPU_CLEAR, 0);
+                if (npu_regs) {
+                    /* ── Fast path: direct register access via mmap ── */
+                    npu_reg_write(TPU_CTRL, CTRL_CLEAR);
 
-                /* Tile over input dimension */
-                for (t = 0; t < n_in_tiles; t++) {
-                    /* Load 4×4 weight tile: W[g*4..g*4+3][t*4..t*4+3] */
-                    int row, col;
-                    for (row = 0; row < 4; row++)
-                        for (col = 0; col < 4; col++)
-                            wt.w[row][col] = weights[(g*4 + row) * ld->in_dim_pad + t*4 + col];
-
-                    my_ioctl(npu_fd, NPU_LOAD_WEIGHTS, &wt);
-
-                    /* Load 4 input values */
-                    for (i = 0; i < 4; i++) {
-                        int idx = t * 4 + i;
-                        comp.x[i] = (idx < cur_in_dim) ? cur_in[idx] : 0;
+                    for (t = 0; t < n_in_tiles; t++) {
+                        int row;
+                        /* Load 4×4 weight tile via W_DATA4 (1 write per row) */
+                        for (row = 0; row < 4; row++) {
+                            const int8_t *wp = &weights[(g*4 + row) * ld->in_dim_pad + t*4];
+                            npu_reg_write(TPU_W_ADDR, row << 2);
+                            npu_reg_write(TPU_W_DATA4,
+                                ((uint32_t)(uint8_t)wp[0])       |
+                                ((uint32_t)(uint8_t)wp[1] << 8)  |
+                                ((uint32_t)(uint8_t)wp[2] << 16) |
+                                ((uint32_t)(uint8_t)wp[3] << 24));
+                        }
+                        /* Pack and write input */
+                        {
+                            int idx = t * 4;
+                            uint8_t x0 = (idx   < cur_in_dim) ? (uint8_t)cur_in[idx]   : 0;
+                            uint8_t x1 = (idx+1 < cur_in_dim) ? (uint8_t)cur_in[idx+1] : 0;
+                            uint8_t x2 = (idx+2 < cur_in_dim) ? (uint8_t)cur_in[idx+2] : 0;
+                            uint8_t x3 = (idx+3 < cur_in_dim) ? (uint8_t)cur_in[idx+3] : 0;
+                            npu_reg_write(TPU_X_IN, x0 | (x1<<8) | (x2<<16) | (x3<<24));
+                        }
+                        /* Start compute and poll done */
+                        npu_reg_write(TPU_CTRL, CTRL_START);
+                        while (!(npu_reg_read(TPU_STATUS) & 1)) ;
                     }
 
-                    my_ioctl(npu_fd, NPU_COMPUTE, &comp);
+                    acc[0] = (int32_t)npu_reg_read(TPU_RES0) + bias[g*4];
+                    acc[1] = (int32_t)npu_reg_read(TPU_RES1) + bias[g*4+1];
+                    acc[2] = (int32_t)npu_reg_read(TPU_RES2) + bias[g*4+2];
+                    acc[3] = (int32_t)npu_reg_read(TPU_RES3) + bias[g*4+3];
+                } else {
+                    /* ── Slow path: ioctl fallback ── */
+                    struct npu_weights wt;
+                    struct npu_compute comp;
+                    struct npu_result result;
+
+                    my_ioctl(npu_fd, NPU_CLEAR, 0);
+                    for (t = 0; t < n_in_tiles; t++) {
+                        int row, col;
+                        for (row = 0; row < 4; row++)
+                            for (col = 0; col < 4; col++)
+                                wt.w[row][col] = weights[(g*4 + row) * ld->in_dim_pad + t*4 + col];
+                        my_ioctl(npu_fd, NPU_LOAD_WEIGHTS, &wt);
+                        for (i = 0; i < 4; i++) {
+                            int idx = t * 4 + i;
+                            comp.x[i] = (idx < cur_in_dim) ? cur_in[idx] : 0;
+                        }
+                        my_ioctl(npu_fd, NPU_COMPUTE, &comp);
+                    }
+                    my_ioctl(npu_fd, NPU_GET_RESULT, &result);
+                    for (i = 0; i < 4; i++)
+                        acc[i] = result.res[i] + bias[g * 4 + i];
                 }
-
-                /* Read accumulated results */
-                my_ioctl(npu_fd, NPU_GET_RESULT, &result);
-
-                /* Add bias */
-                for (i = 0; i < 4; i++)
-                    acc[i] = result.res[i] + bias[g * 4 + i];
 
                 if (is_last) {
                     /* Last layer: keep int32 scores */

@@ -59,7 +59,7 @@ ax301_top.vhd
 
 ## Linux /dev/npu Driver
 
-The kernel driver (`kernel/neorv32_npu.c`) provides a misc char device with ioctl interface:
+The kernel driver (`kernel/neorv32_npu.c`) provides a misc char device with ioctl and mmap interface:
 
 ```c
 #define NPU_LOAD_WEIGHTS  _IOW('N', 1, struct npu_weights)  /* 4×4 int8 matrix */
@@ -68,9 +68,11 @@ The kernel driver (`kernel/neorv32_npu.c`) provides a misc char device with ioct
 #define NPU_CLEAR         _IO('N', 4)                       /* reset accumulators */
 ```
 
+The driver also supports `mmap()` for direct userspace register access, bypassing syscall overhead. On nommu Linux, the TPU physical address (0xF0000000) is mapped directly into userspace via `NOMMU_MAP_DIRECT`. The MNIST inference uses the mmap fast path, eliminating ~13,784 ioctl syscalls per sample.
+
 ## MNIST Inference
 
-3-layer INT8 quantized MLP (784 → 128 → 64 → 10) running on the NPU via `/dev/npu` ioctl. The `mnist` shell command performs tiled 4×4 matrix multiplication across all layers with bias, ReLU, and INT8 requantization.
+3-layer INT8 quantized MLP (784 → 128 → 64 → 10) running on the NPU via mmap'd registers. The `mnist` shell command performs tiled 4×4 matrix multiplication across all layers with bias, ReLU, and INT8 requantization. Weight loading, compute, and result readback are done via direct register writes/reads (no syscall per operation).
 
 Weights are generated from the `tpu_demo/` trained model by `sw/initramfs/gen_weights.py` and embedded in the initramfs binary.
 
@@ -211,3 +213,5 @@ Test 4: Accumulation (two MACs)
 3. **85% LE utilization** — D-cache disabled (~295 LEs saved) and 15 of 16 PE multipliers moved to DSP via `(* multstyle = "dsp" *)` (~272 LEs saved). Only `pe_2_3` remains on LUT due to EP4CE6 physical placement limit. CPU_FAST_MUL_EN cannot be used (would exceed DSP capacity). Zicntr must stay enabled — stage2_loader uses `neorv32_cpu_get_cycle()`.
 4. **Timing slack -0.976 ns** — fails slow-corner STA but passes fast-corner (+0.640 ns). Same pattern as the Linux-only project (-0.583 ns) which works reliably on hardware.
 5. **DSP placement** — 15 of 16 PEs use DSP blocks; only `pe_2_3` is forced to LUT due to EP4CE6 physical placement constraints. The `(* multstyle = "dsp" *)` Verilog attribute forces synthesis to use DSP; without it Quartus falls back to LUT for some PEs.
+6. **nommu mmap requires 3 things** — (a) `mmap_capabilities` returning `NOMMU_MAP_DIRECT`, (b) `get_unmapped_area` returning the physical address, (c) the mmap callback must not fail the nommu `remap_pfn_range` check (`addr == pfn << PAGE_SHIFT`). The driver stores `phys_addr` at probe time rather than navigating `misc.this_device->parent` (which doesn't point to the platform device).
+7. **mmap return value on RV32** — `0xF0000000` is negative as `signed long` on 32-bit. Userspace must use `unsigned long` and check for kernel error codes (`>= 0xFFFFF000`) instead of `< 0`.

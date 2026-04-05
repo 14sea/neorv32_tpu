@@ -26,6 +26,7 @@
 #include <linux/of.h>
 #include <linux/uaccess.h>
 #include <linux/ioctl.h>
+#include <linux/mm.h>
 
 /* Register offsets */
 #define TPU_CTRL      0x00
@@ -67,6 +68,8 @@ struct npu_result {
 
 struct neorv32_npu {
 	void __iomem *base;
+	resource_size_t phys_addr;
+	resource_size_t phys_size;
 	struct miscdevice misc;
 };
 
@@ -152,9 +155,44 @@ static long npu_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 }
 
+static int npu_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	unsigned long size = vma->vm_end - vma->vm_start;
+
+	if (vma->vm_pgoff != 0 || size > PAGE_SIZE)
+		return -EINVAL;
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+
+	return remap_pfn_range(vma, vma->vm_start,
+			       npu_dev->phys_addr >> PAGE_SHIFT,
+			       size, vma->vm_page_prot);
+}
+
+#ifndef CONFIG_MMU
+/* nommu: allow direct mmap of device registers */
+static unsigned long npu_get_unmapped_area(struct file *file,
+		unsigned long addr, unsigned long len,
+		unsigned long pgoff, unsigned long flags)
+{
+	return npu_dev->phys_addr;
+}
+
+static unsigned npu_mmap_capabilities(struct file *file)
+{
+	return NOMMU_MAP_DIRECT | NOMMU_MAP_READ | NOMMU_MAP_WRITE;
+}
+#endif
+
 static const struct file_operations npu_fops = {
 	.owner          = THIS_MODULE,
 	.unlocked_ioctl = npu_ioctl,
+	.mmap           = npu_mmap,
+#ifndef CONFIG_MMU
+	.get_unmapped_area = npu_get_unmapped_area,
+	.mmap_capabilities = npu_mmap_capabilities,
+#endif
 };
 
 static int neorv32_npu_probe(struct platform_device *pdev)
@@ -169,6 +207,9 @@ static int neorv32_npu_probe(struct platform_device *pdev)
 	npu_dev->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(npu_dev->base))
 		return PTR_ERR(npu_dev->base);
+
+	npu_dev->phys_addr = res->start;
+	npu_dev->phys_size = resource_size(res);
 
 	npu_dev->misc.minor = MISC_DYNAMIC_MINOR;
 	npu_dev->misc.name  = "npu";
