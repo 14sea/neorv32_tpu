@@ -70,6 +70,25 @@ my_syscall6(long n, long a0, long a1, long a2, long a3, long a4, long a5) {
 #define __NR_munmap     215
 #define __NR_uname      160
 #define __NR_sysinfo    179
+#define __NR_clock_gettime64 403
+
+#define CLOCK_MONOTONIC 1
+
+struct timespec64 {
+    long long tv_sec;
+    long long tv_nsec;
+};
+
+static unsigned long get_time_us(void) {
+    struct timespec64 ts;
+    unsigned long nsec;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 0;
+    my_syscall(__NR_clock_gettime64, CLOCK_MONOTONIC, (long)&ts, 0);
+    /* Avoid 64-bit division: tv_nsec < 1e9 fits in 32 bits */
+    nsec = (unsigned long)ts.tv_nsec;
+    return (unsigned long)ts.tv_sec * 1000000UL + nsec / 1000;
+}
 
 #define AT_FDCWD        -100
 #define O_RDWR          2
@@ -485,8 +504,10 @@ static int32_t infer_acc[128];     /* max dim, int32 for last layer */
 
 static void cmd_mnist(void) {
     int s, correct = 0;
+    unsigned long total_us = 0;
 
-    my_puts("\n=== MNIST Inference (3-layer MLP on NPU) ===\n\n");
+    my_puts("\n=== MNIST Inference (3-layer MLP on NPU) ===\n");
+    my_puts("  mode: "); my_puts(npu_regs ? "mmap" : "ioctl"); my_puts("\n\n");
 
     if (npu_open() < 0) return;
 
@@ -497,9 +518,12 @@ static void cmd_mnist(void) {
         int8_t *cur_in;
         int cur_in_dim;
         int layer, g, t, i;
+        unsigned long t0, t1;
 
         my_puts("Sample "); my_putnum(s);
         my_puts(" (label="); my_putnum(label); my_puts("): ");
+
+        t0 = get_time_us();
 
         /* Quantize input: uint8 [0,255] → int8 [0,127] */
         for (i = 0; i < 784; i++)
@@ -619,19 +643,56 @@ static void cmd_mnist(void) {
                 }
             }
 
-            my_puts("predicted="); my_putnum(pred);
-            if (pred == label) {
-                my_puts(" [CORRECT]\n");
-                correct++;
-            } else {
-                my_puts(" [WRONG, expected="); my_putnum(label); my_puts("]\n");
+            t1 = get_time_us();
+            {
+                unsigned long elapsed = t1 - t0;
+                total_us += elapsed;
+                my_puts("predicted="); my_putnum(pred);
+                if (pred == label) {
+                    my_puts(" [CORRECT]");
+                    correct++;
+                } else {
+                    my_puts(" [WRONG, expected="); my_putnum(label); my_puts("]");
+                }
+                my_puts(" ("); my_putnum(elapsed / 1000); my_puts(".");
+                my_putnum((elapsed % 1000) / 100); my_puts(" ms)\n");
             }
         }
     }
 
     my_puts("\n=== MNIST: "); my_putnum(correct);
     my_puts("/"); my_putnum(NUM_SAMPLES);
-    my_puts(" correct ===\n\n");
+    my_puts(" correct, total "); my_putnum(total_us / 1000);
+    my_puts("."); my_putnum((total_us % 1000) / 100);
+    my_puts(" ms ("); my_putnum(total_us / NUM_SAMPLES / 1000);
+    my_puts("."); my_putnum((total_us / NUM_SAMPLES % 1000) / 100);
+    my_puts(" ms/sample) ===\n\n");
+}
+
+static void cmd_bench(void) {
+    volatile uint32_t *saved_regs = npu_regs;
+
+    my_puts("\n=== NPU Benchmark: mmap vs ioctl ===\n");
+
+    if (npu_open() < 0) return;
+
+    if (!npu_regs) {
+        my_puts("  mmap not available, cannot compare\n\n");
+        cmd_mnist();
+        return;
+    }
+
+    /* Run with mmap */
+    my_puts("\n--- mmap (direct register access) ---\n");
+    cmd_mnist();
+
+    /* Force ioctl path */
+    npu_regs = (volatile uint32_t *)0;
+    my_puts("--- ioctl (syscall per operation) ---\n");
+    cmd_mnist();
+
+    /* Restore */
+    npu_regs = saved_regs;
 }
 
 static void cmd_help(void) {
@@ -640,6 +701,7 @@ static void cmd_help(void) {
     my_puts("  info   - memory & uptime\n");
     my_puts("  npu    - test NPU (4x4 systolic array)\n");
     my_puts("  mnist  - run MNIST inference on NPU\n");
+    my_puts("  bench  - benchmark mmap vs ioctl\n");
     my_puts("  help   - this message\n");
     my_puts("  exit   - halt system\n");
 }
@@ -673,6 +735,7 @@ void _start(void) {
         else if (my_strcmp(buf, "info") == 0) cmd_info();
         else if (my_strcmp(buf, "npu") == 0) cmd_npu();
         else if (my_strcmp(buf, "mnist") == 0) cmd_mnist();
+        else if (my_strcmp(buf, "bench") == 0) cmd_bench();
         else if (my_strcmp(buf, "help") == 0) cmd_help();
         else if (my_strcmp(buf, "exit") == 0) break;
         else { my_puts("unknown: "); my_puts(buf); my_puts("\n"); }

@@ -70,6 +70,15 @@ The kernel driver (`kernel/neorv32_npu.c`) provides a misc char device with ioct
 
 The driver also supports `mmap()` for direct userspace register access, bypassing syscall overhead. On nommu Linux, the TPU physical address (0xF0000000) is mapped directly into userspace via `NOMMU_MAP_DIRECT`. The MNIST inference uses the mmap fast path, eliminating ~13,784 ioctl syscalls per sample.
 
+### Performance: mmap vs ioctl
+
+| Mode | Per sample | Speedup |
+|------|-----------|---------|
+| mmap (direct register access) | 704 ms | **26.7×** |
+| ioctl (syscall per operation) | 18,841 ms | 1× |
+
+The `bench` shell command runs MNIST inference with both paths for direct comparison.
+
 ## MNIST Inference
 
 3-layer INT8 quantized MLP (784 → 128 → 64 → 10) running on the NPU via mmap'd registers. The `mnist` shell command performs tiled 4×4 matrix multiplication across all layers with bias, ReLU, and INT8 requantization. Weight loading, compute, and result readback are done via direct register writes/reads (no syscall per operation).
@@ -80,12 +89,13 @@ Weights are generated from the `tpu_demo/` trained model by `sw/initramfs/gen_we
 npu# mnist
 
 === MNIST Inference (3-layer MLP on NPU) ===
+  mode: mmap
 
-Sample 0 (label=7): predicted=7 [CORRECT]
-Sample 1 (label=2): predicted=2 [CORRECT]
-Sample 2 (label=1): predicted=1 [CORRECT]
+Sample 0 (label=7): predicted=7 [CORRECT] (704.6 ms)
+Sample 1 (label=2): predicted=2 [CORRECT] (704.5 ms)
+Sample 2 (label=1): predicted=1 [CORRECT] (704.3 ms)
 
-=== MNIST: 3/3 correct ===
+=== MNIST: 3/3 correct, total 2113.5 ms (704.5 ms/sample) ===
 ```
 
 ## Build & Run
