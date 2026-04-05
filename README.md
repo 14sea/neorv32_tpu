@@ -11,6 +11,7 @@ The NPU is memory-mapped on the Wishbone (XBUS) bus and accessible from Linux us
 | Phase 1: Bare-metal NEORV32 + TPU | ✅ 21/21 tests passed |
 | Phase 2: Linux + /dev/npu driver  | ✅ 4/4 tests passed |
 | Phase 2: MNIST inference on NPU   | ✅ 10/10 correct (452 ms/sample via mmap) |
+| Phase 2: CNN inference on NPU     | ✅ 10/10 correct (986 ms/sample via mmap) |
 
 ## Resource Usage (EP4CE6, 50 MHz)
 
@@ -79,6 +80,50 @@ The driver also supports `mmap()` for direct userspace register access, bypassin
 
 The `bench` shell command runs MNIST inference with both paths for direct comparison.
 
+## CNN Inference
+
+im2col CNN for MNIST running entirely on the NPU via mmap'd registers. 4-layer network: two conv+pool layers (im2col → tiled 4×4 matmul on NPU) followed by two FC layers (same tiled matmul as MLP).
+
+```
+Input: 28×28×1 int8 [0,127]
+Conv(1→4, 5×5, valid) + ReLU + MaxPool(2×2) → 12×12×4   [576 patches × 7 tiles on NPU]
+Conv(4→8, 3×3, valid) + ReLU + MaxPool(2×2) →  5×5×8    [100 patches × 9 tiles on NPU]
+FC(200→64) + ReLU                                         [50 tile groups on NPU]
+FC(64→10)                                                  [48 tile groups on NPU]
+```
+
+~6,698 NPU operations per sample (vs ~866 for MLP). Weights generated from `tpu_demo/cnn/` trained model by `sw/initramfs/gen_cnn_weights.py` (~22 KB embedded in initramfs).
+
+```
+npu# cnn
+
+=== CNN Inference (im2col on NPU) ===
+  Conv(1->4, 5x5)+Pool -> Conv(4->8, 3x3)+Pool -> FC(200->64) -> FC(64->10)
+  mode: mmap
+
+Sample 0 (label=7): predicted=7 [CORRECT] (983.7 ms)
+Sample 1 (label=4): predicted=4 [CORRECT] (988.9 ms)
+Sample 2 (label=5): predicted=5 [CORRECT] (979.0 ms)
+Sample 3 (label=1): predicted=1 [CORRECT] (991.7 ms)
+Sample 4 (label=8): predicted=8 [CORRECT] (980.8 ms)
+Sample 5 (label=1): predicted=1 [CORRECT] (992.3 ms)
+Sample 6 (label=5): predicted=5 [CORRECT] (995.4 ms)
+Sample 7 (label=8): predicted=8 [CORRECT] (979.2 ms)
+Sample 8 (label=7): predicted=7 [CORRECT] (983.4 ms)
+Sample 9 (label=4): predicted=4 [CORRECT] (987.7 ms)
+
+=== CNN: 10/10 correct, total 9862.5 ms (986.2 ms/sample) ===
+```
+
+### CNN vs MLP Performance
+
+| Model | Accuracy | Per sample | NPU ops/sample |
+|-------|----------|-----------|-----------------|
+| MLP (784→128→64→10) | 10/10 | 452 ms | ~866 |
+| CNN (2 conv + 2 FC) | 10/10 | 986 ms | ~6,698 |
+
+CNN is 2.2× slower due to im2col conv layers requiring ~5,832 additional NPU operations per sample. However, CNN achieves higher accuracy on larger test sets (99.2% vs ~97% for MLP).
+
 ## MNIST Inference
 
 3-layer INT8 quantized MLP (784 → 128 → 64 → 10) running on the NPU via mmap'd registers. The `mnist` shell command performs tiled 4×4 matrix multiplication across all layers with bias, ReLU, and INT8 requantization. Weight loading, compute, and result readback are done via direct register writes/reads (no syscall per operation).
@@ -126,7 +171,8 @@ python3 host/boot_linux.py --port /dev/ttyUSB0 --skip-program
 
 # At the npu# prompt:
 npu     # runs 4 NPU hardware tests
-mnist   # runs MNIST inference (3 samples)
+mnist   # runs MNIST MLP inference (10 samples)
+cnn     # runs CNN inference with im2col (10 samples)
 ```
 
 ### Full Build
@@ -182,8 +228,10 @@ neorv32_tpu/
 │   ├── tpu_test/           — Phase 1 bare-metal test firmware
 │   ├── stage2_loader/      — Bootloader stage2 (xmodem receiver)
 │   ├── initramfs/          — Linux init with npu + mnist commands
-│   │   ├── gen_weights.py  — Generates mnist_data.h from tpu_demo weights
-│   │   └── mnist_data.h    — INT8 weights/biases/test samples (generated)
+│   │   ├── gen_weights.py  — Generates mnist_data.h from tpu_demo MLP weights
+│   │   ├── gen_cnn_weights.py — Generates cnn_data.h from tpu_demo CNN weights
+│   │   ├── mnist_data.h    — INT8 MLP weights/biases/test samples (generated)
+│   │   └── cnn_data.h      — INT8 CNN weights/biases/test samples (generated)
 │   └── npu_test/           — Standalone userspace NPU test (libc)
 ├── quartus/                — Quartus project
 ├── sim/                    — Verilog testbenches

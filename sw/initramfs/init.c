@@ -496,6 +496,7 @@ static void cmd_npu(void) {
 /* ── MNIST Inference ───────────────────────────────────────────────── */
 
 #include "mnist_data.h"
+#include "cnn_data.h"
 
 /* Temporary buffers for inference (static to avoid stack overflow) */
 static int8_t  infer_input[784];
@@ -696,12 +697,296 @@ static void cmd_bench(void) {
     npu_regs = saved_regs;
 }
 
+/* ── CNN Inference ─────────────────────────────────────────────────── */
+
+/* Static buffers for CNN (avoid stack overflow) */
+static int8_t  cnn_feat_in[784];       /* max: 1×28×28 = 784 */
+static int8_t  cnn_feat_out[2304];     /* max: 4×24×24 = 2304 (conv0 pre-pool) */
+static int8_t  cnn_patches[576 * 28];  /* max: 576 patches × 28 (conv0 K_pad) */
+static int8_t  cnn_fc_buf[200];        /* FC input/output */
+static int32_t cnn_scores[12];         /* FC1 output (pad4(10)) */
+
+/* im2col: extract patches from (C, H, W) feature map
+ * Output: patches[P][K_pad] where P = out_h * out_w, K = C*kH*kW
+ * patches must be pre-zeroed for K_pad > K padding */
+static void im2col(const int8_t *feat, int C, int H, int W,
+                   int kH, int kW, int K_pad,
+                   int8_t *patches, int out_h, int out_w)
+{
+    int oh, ow, c, kh, kw, k;
+    int P = out_h * out_w;
+
+    /* Zero the patch buffer for padding */
+    for (k = 0; k < P * K_pad; k++)
+        patches[k] = 0;
+
+    for (oh = 0; oh < out_h; oh++) {
+        for (ow = 0; ow < out_w; ow++) {
+            int p = oh * out_w + ow;
+            k = 0;
+            for (c = 0; c < C; c++) {
+                for (kh = 0; kh < kH; kh++) {
+                    for (kw = 0; kw < kW; kw++) {
+                        patches[p * K_pad + k] =
+                            feat[c * H * W + (oh + kh) * W + (ow + kw)];
+                        k++;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* Run one conv layer on NPU: im2col → tiled 4×4 matmul → requant+ReLU
+ * feat_in: (in_ch, in_h, in_w) int8
+ * feat_out: (out_ch, out_h, out_w) int8 */
+static void cnn_conv_npu(const int8_t *feat_in, int8_t *feat_out,
+                         int conv_idx)
+{
+    const cnn_conv_t *cd = &cnn_conv_dims[conv_idx];
+    const int8_t *weights = cnn_get_conv_w(conv_idx);
+    const int32_t *bias = cnn_get_conv_b(conv_idx);
+    int P = cd->out_h * cd->out_w;
+    int n_out_groups = cd->out_ch_pad / 4;
+    int n_in_tiles = cd->patch_size_pad / 4;
+    int p, g, t, row, i;
+
+    /* im2col */
+    im2col(feat_in, cd->in_ch, cd->in_h, cd->in_w,
+           cd->kH, cd->kW, cd->patch_size_pad,
+           cnn_patches, cd->out_h, cd->out_w);
+
+    /* For each patch, run tiled matmul */
+    for (p = 0; p < P; p++) {
+        const int8_t *patch = &cnn_patches[p * cd->patch_size_pad];
+
+        for (g = 0; g < n_out_groups; g++) {
+            int32_t acc[4];
+
+            npu_reg_write(TPU_CTRL, CTRL_CLEAR);
+
+            for (t = 0; t < n_in_tiles; t++) {
+                /* Load 4×4 weight tile */
+                for (row = 0; row < 4; row++) {
+                    const int8_t *wp = &weights[(g*4 + row) * cd->patch_size_pad + t*4];
+                    npu_reg_write(TPU_W_ADDR, row << 2);
+                    npu_reg_write(TPU_W_DATA4,
+                        ((uint32_t)(uint8_t)wp[0])       |
+                        ((uint32_t)(uint8_t)wp[1] << 8)  |
+                        ((uint32_t)(uint8_t)wp[2] << 16) |
+                        ((uint32_t)(uint8_t)wp[3] << 24));
+                }
+                /* Pack and write input */
+                {
+                    const int8_t *xp = &patch[t * 4];
+                    npu_reg_write(TPU_X_IN,
+                        ((uint32_t)(uint8_t)xp[0])       |
+                        ((uint32_t)(uint8_t)xp[1] << 8)  |
+                        ((uint32_t)(uint8_t)xp[2] << 16) |
+                        ((uint32_t)(uint8_t)xp[3] << 24));
+                }
+                npu_reg_write(TPU_CTRL, CTRL_START);
+                while (!(npu_reg_read(TPU_STATUS) & 1)) ;
+            }
+
+            acc[0] = (int32_t)npu_reg_read(TPU_RES0) + bias[g*4];
+            acc[1] = (int32_t)npu_reg_read(TPU_RES1) + bias[g*4+1];
+            acc[2] = (int32_t)npu_reg_read(TPU_RES2) + bias[g*4+2];
+            acc[3] = (int32_t)npu_reg_read(TPU_RES3) + bias[g*4+3];
+
+            /* Requant + ReLU → int8 */
+            for (i = 0; i < 4; i++) {
+                int idx = g * 4 + i;
+                if (idx < cd->out_ch) {
+                    int32_t val = (acc[i] * cd->requant_mult) >> 16;
+                    if (val < 0) val = 0;
+                    if (val > 127) val = 127;
+                    /* Store in (F, H_out, W_out) layout: feat_out[f * P + p] */
+                    feat_out[idx * P + p] = (int8_t)val;
+                }
+            }
+        }
+    }
+}
+
+/* 2×2 max pooling: (C, H, W) → (C, H/2, W/2) */
+static void cnn_maxpool(const int8_t *in, int8_t *out,
+                        int C, int H, int W)
+{
+    int c, h, w;
+    int H_out = H / 2;
+    int W_out = W / 2;
+
+    for (c = 0; c < C; c++) {
+        for (h = 0; h < H_out; h++) {
+            for (w = 0; w < W_out; w++) {
+                int8_t v00 = in[c*H*W + (h*2)*W + w*2];
+                int8_t v01 = in[c*H*W + (h*2)*W + w*2+1];
+                int8_t v10 = in[c*H*W + (h*2+1)*W + w*2];
+                int8_t v11 = in[c*H*W + (h*2+1)*W + w*2+1];
+                int8_t m = v00;
+                if (v01 > m) m = v01;
+                if (v10 > m) m = v10;
+                if (v11 > m) m = v11;
+                out[c*H_out*W_out + h*W_out + w] = m;
+            }
+        }
+    }
+}
+
+/* Run one FC layer on NPU (same as MLP tiled matmul) */
+static void cnn_fc_npu(const int8_t *x_in, int x_dim,
+                       void *out, int fc_idx, int is_last)
+{
+    const cnn_fc_t *fd = &cnn_fc_dims[fc_idx];
+    const int8_t *weights = cnn_get_fc_w(fc_idx);
+    const int32_t *bias = cnn_get_fc_b(fc_idx);
+    int n_out_groups = fd->out_pad / 4;
+    int n_in_tiles = fd->in_pad / 4;
+    int g, t, row, i;
+
+    for (g = 0; g < n_out_groups; g++) {
+        int32_t acc[4];
+
+        npu_reg_write(TPU_CTRL, CTRL_CLEAR);
+
+        for (t = 0; t < n_in_tiles; t++) {
+            for (row = 0; row < 4; row++) {
+                const int8_t *wp = &weights[(g*4 + row) * fd->in_pad + t*4];
+                npu_reg_write(TPU_W_ADDR, row << 2);
+                npu_reg_write(TPU_W_DATA4,
+                    ((uint32_t)(uint8_t)wp[0])       |
+                    ((uint32_t)(uint8_t)wp[1] << 8)  |
+                    ((uint32_t)(uint8_t)wp[2] << 16) |
+                    ((uint32_t)(uint8_t)wp[3] << 24));
+            }
+            {
+                int idx = t * 4;
+                uint8_t x0 = (idx   < x_dim) ? (uint8_t)x_in[idx]   : 0;
+                uint8_t x1 = (idx+1 < x_dim) ? (uint8_t)x_in[idx+1] : 0;
+                uint8_t x2 = (idx+2 < x_dim) ? (uint8_t)x_in[idx+2] : 0;
+                uint8_t x3 = (idx+3 < x_dim) ? (uint8_t)x_in[idx+3] : 0;
+                npu_reg_write(TPU_X_IN, x0 | (x1<<8) | (x2<<16) | (x3<<24));
+            }
+            npu_reg_write(TPU_CTRL, CTRL_START);
+            while (!(npu_reg_read(TPU_STATUS) & 1)) ;
+        }
+
+        acc[0] = (int32_t)npu_reg_read(TPU_RES0) + bias[g*4];
+        acc[1] = (int32_t)npu_reg_read(TPU_RES1) + bias[g*4+1];
+        acc[2] = (int32_t)npu_reg_read(TPU_RES2) + bias[g*4+2];
+        acc[3] = (int32_t)npu_reg_read(TPU_RES3) + bias[g*4+3];
+
+        if (is_last) {
+            for (i = 0; i < 4; i++) {
+                int idx = g * 4 + i;
+                if (idx < fd->out_dim)
+                    ((int32_t *)out)[idx] = acc[i];
+            }
+        } else {
+            for (i = 0; i < 4; i++) {
+                int idx = g * 4 + i;
+                int32_t val = (acc[i] * fd->requant_mult) >> 16;
+                if (fd->has_relu && val < 0) val = 0;
+                if (val > 127) val = 127;
+                if (val < -128) val = -128;
+                if (idx < fd->out_dim)
+                    ((int8_t *)out)[idx] = (int8_t)val;
+            }
+        }
+    }
+}
+
+static void cmd_cnn(void) {
+    int s, correct = 0;
+    unsigned long total_us = 0;
+
+    my_puts("\n=== CNN Inference (im2col on NPU) ===\n");
+    my_puts("  Conv(1->4, 5x5)+Pool -> Conv(4->8, 3x3)+Pool -> FC(200->64) -> FC(64->10)\n");
+
+    if (npu_open() < 0) return;
+
+    if (!npu_regs) {
+        my_puts("  ERROR: CNN requires mmap (too many NPU ops for ioctl)\n\n");
+        return;
+    }
+
+    my_puts("  mode: mmap\n\n");
+
+    for (s = 0; s < CNN_NUM_SAMPLES; s++) {
+        int label = cnn_test_labels[s];
+        const int8_t *pixels = cnn_get_test_sample(s);
+        int i;
+        unsigned long t0, t1, elapsed;
+
+        my_puts("Sample "); my_putnum(s);
+        my_puts(" (label="); my_putnum(label); my_puts("): ");
+
+        t0 = get_time_us();
+
+        /* Copy input to feat_in as (1, 28, 28) */
+        for (i = 0; i < 784; i++)
+            cnn_feat_in[i] = pixels[i];
+
+        /* Conv0: (1,28,28) → (4,24,24) → pool → (4,12,12) */
+        cnn_conv_npu(cnn_feat_in, cnn_feat_out, 0);
+        cnn_maxpool(cnn_feat_out, cnn_feat_in, 4, 24, 24);
+        /* cnn_feat_in now has (4,12,12) = 576 bytes */
+
+        /* Conv1: (4,12,12) → (8,10,10) → pool → (8,5,5) */
+        cnn_conv_npu(cnn_feat_in, cnn_feat_out, 1);
+        cnn_maxpool(cnn_feat_out, cnn_feat_in, 8, 10, 10);
+        /* cnn_feat_in now has (8,5,5) = 200 bytes */
+
+        /* Flatten → FC0: 200 → 64 */
+        cnn_fc_npu(cnn_feat_in, 200, cnn_fc_buf, 0, 0);
+
+        /* FC1: 64 → 10 (int32 scores) */
+        cnn_fc_npu(cnn_fc_buf, 64, cnn_scores, 1, 1);
+
+        /* Find argmax */
+        {
+            int pred = 0;
+            int32_t max_val = cnn_scores[0];
+            for (i = 1; i < 10; i++) {
+                if (cnn_scores[i] > max_val) {
+                    max_val = cnn_scores[i];
+                    pred = i;
+                }
+            }
+
+            t1 = get_time_us();
+            elapsed = t1 - t0;
+            total_us += elapsed;
+
+            my_puts("predicted="); my_putnum(pred);
+            if (pred == label) {
+                my_puts(" [CORRECT]");
+                correct++;
+            } else {
+                my_puts(" [WRONG, expected="); my_putnum(label); my_puts("]");
+            }
+            my_puts(" ("); my_putnum(elapsed / 1000); my_puts(".");
+            my_putnum((elapsed % 1000) / 100); my_puts(" ms)\n");
+        }
+    }
+
+    my_puts("\n=== CNN: "); my_putnum(correct);
+    my_puts("/"); my_putnum(CNN_NUM_SAMPLES);
+    my_puts(" correct, total "); my_putnum(total_us / 1000);
+    my_puts("."); my_putnum((total_us % 1000) / 100);
+    my_puts(" ms ("); my_putnum(total_us / CNN_NUM_SAMPLES / 1000);
+    my_puts("."); my_putnum((total_us / CNN_NUM_SAMPLES % 1000) / 100);
+    my_puts(" ms/sample) ===\n\n");
+}
+
 static void cmd_help(void) {
     my_puts("Commands:\n");
     my_puts("  uname  - kernel info\n");
     my_puts("  info   - memory & uptime\n");
     my_puts("  npu    - test NPU (4x4 systolic array)\n");
-    my_puts("  mnist  - run MNIST inference on NPU\n");
+    my_puts("  mnist  - run MNIST inference on NPU (3-layer MLP)\n");
+    my_puts("  cnn    - run CNN inference on NPU (im2col)\n");
     my_puts("  bench  - benchmark mmap vs ioctl\n");
     my_puts("  help   - this message\n");
     my_puts("  exit   - halt system\n");
@@ -722,7 +1007,7 @@ void _start(void) {
     my_puts("========================================\n");
     cmd_uname();
     cmd_info();
-    my_puts("\nType 'npu' to test, 'mnist' for inference.\n\n");
+    my_puts("\nType 'npu' to test, 'mnist' or 'cnn' for inference.\n\n");
 
     for (;;) {
         my_puts("npu# ");
@@ -736,6 +1021,7 @@ void _start(void) {
         else if (my_strcmp(buf, "info") == 0) cmd_info();
         else if (my_strcmp(buf, "npu") == 0) cmd_npu();
         else if (my_strcmp(buf, "mnist") == 0) cmd_mnist();
+        else if (my_strcmp(buf, "cnn") == 0) cmd_cnn();
         else if (my_strcmp(buf, "bench") == 0) cmd_bench();
         else if (my_strcmp(buf, "help") == 0) cmd_help();
         else if (my_strcmp(buf, "exit") == 0) break;
