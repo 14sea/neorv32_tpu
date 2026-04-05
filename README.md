@@ -10,7 +10,7 @@ The NPU is memory-mapped on the Wishbone (XBUS) bus and accessible from Linux us
 |-------|--------|
 | Phase 1: Bare-metal NEORV32 + TPU | ✅ 21/21 tests passed |
 | Phase 2: Linux + /dev/npu driver  | ✅ 4/4 tests passed |
-| Phase 2: MNIST inference on NPU   | ✅ 3/3 correct (labels 7, 2, 1) |
+| Phase 2: MNIST inference on NPU   | ✅ 10/10 correct (452 ms/sample via mmap) |
 
 ## Resource Usage (EP4CE6, 50 MHz)
 
@@ -91,11 +91,18 @@ npu# mnist
 === MNIST Inference (3-layer MLP on NPU) ===
   mode: mmap
 
-Sample 0 (label=7): predicted=7 [CORRECT] (704.6 ms)
-Sample 1 (label=2): predicted=2 [CORRECT] (704.5 ms)
-Sample 2 (label=1): predicted=1 [CORRECT] (704.3 ms)
+Sample 0 (label=7): predicted=7 [CORRECT] (428.2 ms)
+Sample 1 (label=2): predicted=2 [CORRECT] (479.2 ms)
+Sample 2 (label=1): predicted=1 [CORRECT] (430.9 ms)
+Sample 3 (label=0): predicted=0 [CORRECT] (428.2 ms)
+Sample 4 (label=4): predicted=4 [CORRECT] (495.3 ms)
+Sample 5 (label=1): predicted=1 [CORRECT] (428.1 ms)
+Sample 6 (label=4): predicted=4 [CORRECT] (483.2 ms)
+Sample 7 (label=9): predicted=9 [CORRECT] (428.3 ms)
+Sample 8 (label=5): predicted=5 [CORRECT] (428.1 ms)
+Sample 9 (label=9): predicted=9 [CORRECT] (495.3 ms)
 
-=== MNIST: 3/3 correct, total 2113.5 ms (704.5 ms/sample) ===
+=== MNIST: 10/10 correct, total 4525.3 ms (452.5 ms/sample) ===
 ```
 
 ## Build & Run

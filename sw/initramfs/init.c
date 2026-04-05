@@ -507,9 +507,10 @@ static void cmd_mnist(void) {
     unsigned long total_us = 0;
 
     my_puts("\n=== MNIST Inference (3-layer MLP on NPU) ===\n");
-    my_puts("  mode: "); my_puts(npu_regs ? "mmap" : "ioctl"); my_puts("\n\n");
 
     if (npu_open() < 0) return;
+
+    my_puts("  mode: "); my_puts(npu_regs ? "mmap" : "ioctl"); my_puts("\n\n");
 
     for (s = 0; s < NUM_SAMPLES; s++) {
         int si = test_sample_indices[s];

@@ -120,11 +120,10 @@ def main():
     out.append(arr_to_c("test_labels", labels, 'uint8'))
     out.append("")
 
-    # Only include 3 samples to keep size manageable
-    n_samples = 3
+    n_samples = 10
     out.append(f"#undef NUM_SAMPLES")
     out.append(f"#define NUM_SAMPLES {n_samples}")
-    out.append(f"static const int test_sample_indices[NUM_SAMPLES] = {{0, 1, 2}};")
+    out.append(f"static const int test_sample_indices[NUM_SAMPLES] = {{{', '.join(str(i) for i in range(n_samples))}}};")
     for s in range(n_samples):
         out.append(arr_to_c(f"test_sample_{s}", samples[s], 'uint8'))
     out.append("")
