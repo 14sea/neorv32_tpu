@@ -155,19 +155,16 @@ Sample 9 (label=9): predicted=9 [CORRECT] (495.3 ms)
 ### Prerequisites
 
 - Intel Quartus Prime Lite 21.1+
-- xPack RISC-V GCC 14.2.0 (for kernel)
+- xPack RISC-V GCC 14.2.0 (for kernel + stage2)
 - Buildroot Linux GCC (for initramfs init)
-- `see_neorv32_run_linux/` project (patched kernel source, stage2 loader)
+- `openFPGALoader` with EP4CE6 support (built from source recommended)
+- `linux-6.6.83.tar.xz` placed at repo root (download from https://cdn.kernel.org/pub/linux/kernel/v6.x/ — not committed)
 
 ### Quick Start (pre-built)
 
 ```bash
-# Program FPGA
-quartus_pgm -c usb-blaster -m jtag -o "p;quartus/neorv32_tpu.sof"
-
-# Reset board (press KEY2), then boot Linux
-cd ~/see_neorv32_run_linux
-python3 host/boot_linux.py --port /dev/ttyUSB0 --skip-program
+# Program FPGA + boot Linux in one shot
+python3 host/boot_linux.py --port /dev/ttyUSB0
 
 # At the npu# prompt:
 npu     # runs 4 NPU hardware tests
@@ -273,7 +270,7 @@ Test 4: Accumulation (two MACs)
 
 ## Known Pitfalls
 
-1. **Stage2 loader must be built against this project's NEORV32** — the `neorv32/` subdir has a different commit than `see_neorv32_run_linux/neorv32/`. Using the wrong stage2 causes `ERROR_SIGNATURE` from the bootloader.
+1. **Stage2 loader must be built against this project's NEORV32 submodule** — `sw/stage2_loader/` links against `neorv32/sw/common/` HAL. Using a stage2 built against a different NEORV32 version may cause `ERROR_SIGNATURE` from the bootloader.
 2. **Init must mount devtmpfs and proc** — `/dev/npu` is created by devtmpfs but only visible after mounting. `/proc/misc` is needed to find the dynamic minor number for mknod fallback.
 3. **85% LE utilization** — D-cache disabled (~295 LEs saved) and 15 of 16 PE multipliers moved to DSP via `(* multstyle = "dsp" *)` (~272 LEs saved). Only `pe_2_3` remains on LUT due to EP4CE6 physical placement limit. CPU_FAST_MUL_EN cannot be used (would exceed DSP capacity). Zicntr must stay enabled — stage2_loader uses `neorv32_cpu_get_cycle()`.
 4. **Timing slack -0.976 ns** — fails slow-corner STA but passes fast-corner (+0.640 ns). Same pattern as the Linux-only project (-0.583 ns) which works reliably on hardware.

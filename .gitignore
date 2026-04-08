@@ -1,5 +1,9 @@
 # Build outputs (can be regenerated)
 output/
+
+# Kernel source tree and tarball (extracted/downloaded, not committed)
+linux-6.6.83/
+linux-6.6.83.tar.xz
 sw/initramfs/init
 sw/initramfs/gen_init_cpio
 sw/initramfs/filelist.txt

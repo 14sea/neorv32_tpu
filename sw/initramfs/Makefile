@@ -6,7 +6,7 @@ CC = $(RISCV_LINUX_PREFIX)gcc
 STRIP = $(RISCV_LINUX_PREFIX)strip
 HOSTCC = gcc
 
-LINUX_DIR ?= /home/test/see_neorv32_run_linux/linux-6.6.83
+LINUX_DIR ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../linux-6.6.83)
 
 CFLAGS = -nostdlib -nostartfiles -fpie -mcmodel=medany \
          -fno-plt -static -Wl,-pie -Wl,--no-dynamic-linker \
