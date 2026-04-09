@@ -17,7 +17,7 @@ The NPU is memory-mapped on the Wishbone (XBUS) bus and accessible from Linux us
 
 | Resource | Used | Available | Utilization |
 |----------|------|-----------|-------------|
-| Logic Elements | 5,318 | 6,272 | 85% |
+| Logic Elements | 5,431 | 6,272 | 87% |
 | Memory bits | 166,912 | 276,480 | 60% |
 | DSP 9-bit elements | 15 | 30 | 50% |
 
@@ -32,7 +32,8 @@ ax301_top.vhd
 │   ├── GPIO (4-bit LEDs)
 │   └── CLINT (timer)
 ├── wb_sdram_ctrl → sdram_ctrl → 32 MB SDRAM
-└── wb_tpu_accel → tpu_accel → systolic_array_4x4 → 16× pe
+├── wb_tpu_accel → tpu_accel → systolic_array_4x4 → 16× pe
+└── neorv32 SPI → SD card (boot-time only, read-only bulk storage)
 ```
 
 ### Memory Map
@@ -162,15 +163,81 @@ Sample 9 (label=9): predicted=9 [CORRECT] (495.3 ms)
 
 ### Quick Start (pre-built)
 
-```bash
-# Program FPGA + boot Linux in one shot
-python3 host/boot_linux.py --port /dev/ttyUSB0
+Two boot paths are supported. Both use the same FPGA + Linux image; the only difference is how the kernel reaches SDRAM.
 
-# At the npu# prompt:
+**Path A — no SD card (UART xmodem, default, works on any AX301):**
+
+```bash
+python3 host/boot_linux.py --port /dev/ttyUSB0   # ~243 s to shell
+```
+
+**Path B — SD card fast boot (requires SD card wired to on-board slot):**
+
+```bash
+# One-time: pack Image + DTB + initramfs and stream-write to SD
+python3 host/sd_pack.py --port /dev/ttyUSB0      # ~108 s @ 230400 baud
+
+# Every boot: stage2 reads blob from SD into SDRAM, jumps to kernel
+python3 host/boot_sd.py  --port /dev/ttyUSB0     # ~150 s to shell
+```
+
+At the `npu#` prompt:
+
+```text
 npu     # runs 4 NPU hardware tests
 mnist   # runs MNIST MLP inference (10 samples)
 cnn     # runs CNN inference with im2col (10 samples)
+bench   # benchmarks mmap vs ioctl NPU access
 ```
+
+## Fast Boot from SD Card (optional)
+
+The stage2 loader can read a packed kernel blob directly from an SD card over NEORV32's hardware SPI peripheral, skipping the ~145 s UART xmodem transfer. **Linux still runs from SDRAM** — the SD card is only read-only bulk storage at boot, so no kernel driver is involved. Ported from [see_neorv32_run_linux](https://github.com/14sea/see_neorv32_run_linux), including the Phase 1–6 speed-ups (230400 baud UART, persistent stage2, `--update` one-shot, build-tag check, parametric dump).
+
+**Wiring** (AX301 on-board SD slot): `PIN_J15=SD_CLK`, `PIN_K16=SD_DI (MOSI)`, `PIN_J16=SD_DO (MISO)`, `PIN_K15=SD_NCS`. Requires `IO_SPI_EN=true` in `rtl/ax301_top.vhd` (already set).
+
+**Blob layout** (fixed LBA slots, see `host/sd_layout.py`):
+
+```
+LBA 0            header (NEOLNX magic + sizes + LBAs + layout_version)
+LBA 1..4000      Image   (reserve 2 MB)
+LBA 4001..4008   DTB     (reserve 4 KB)
+LBA 4009..8008   initrd  (reserve 2 MB)
+```
+
+**Decoupled kernel / initramfs**: `board/linux_defconfig` uses `CONFIG_INITRAMFS_SOURCE=""` — the Image does **not** embed initramfs. Stage2 loads Image / DTB / initramfs as three independent sections from the SD blob, then patches the DTB's `chosen/linux,initrd-end` sentinel (`0xC0DEDEAD`) in RAM with the real end address before jumping to the kernel. This lets you iterate on `/init` (22 s cycle) without rebuilding or re-flashing the kernel.
+
+**Iteration loop** (edit `sw/initramfs/init.c` → test):
+
+```bash
+make -C sw/initramfs LINUX_DIR=../../linux-6.6.83
+cp sw/initramfs/neo_initramfs.cpio.gz output/
+python3 host/boot_sd.py --update                 # ~17 s update + boot
+```
+
+**Host tools** (all under `host/`):
+
+| Tool | Purpose |
+|------|---------|
+| `boot_linux.py` | UART xmodem boot (no SD needed) |
+| `sd_pack.py`    | One-time full pack + write (header + Image + DTB + initrd) |
+| `sd_update.py`  | Incremental update (typically 7 sectors / ~10 s for init-only) |
+| `boot_sd.py`    | Boot from on-card blob, with build-tag check |
+| `sd_dump.py`    | Parametric SD block reader for debugging |
+| `sd_proto.py`   | Shared FPGA program + stage2 upload + baud switching |
+| `sd_layout.py`  | Single source of truth for slot LBAs/sizes |
+
+**Stage2 loader** fits in 8 KB IMEM with full SD support (~7832 / 8192 B). UART command modes:
+
+| Cmd | Mode |
+|-----|------|
+| `l` | xmodem Linux boot (used by `boot_linux.py`) |
+| `b` | Boot from SD blob (used by `boot_sd.py`) |
+| `W` | Multi-segment SD write with per-block `K` ACK |
+| `R` | Read on-card header for verify / build-tag check |
+| `B` | Bump UART baud (115200 → 230400) |
+| `d` | Parametric SD dump (cap 4096 sectors per call) |
+| `s`/`w` | SD smoke / single-block write test |
 
 ### Full Build
 
@@ -198,9 +265,11 @@ vvp tb_tpu_accel   # 16/16 tests pass
 ## Boot Sequence
 
 1. **NEORV32 bootloader** (ROM, 19200 baud) → uploads stage2_loader
-2. **Stage2 loader** (IMEM, 115200 baud) → xmodem kernel+DTB+initramfs to SDRAM, CRC-32 verify
-3. **Linux kernel** boots from SDRAM (0x40000000), ~132s to shell
-4. **Mini shell** with `npu` (driver test) and `mnist` (inference) commands
+2. **Stage2 loader** (IMEM, 115200 baud) → dispatches on UART command:
+   - `l` → xmodem kernel + DTB + initramfs to SDRAM, CRC-32 verify
+   - `b` → read NEOLNX blob from SD into SDRAM, patch DTB initrd sentinel
+3. **Linux kernel** boots from SDRAM (0x40000000), ~36 s (SD path) or ~132 s (xmodem path) to shell
+4. **Mini shell** with `npu` / `mnist` / `cnn` / `bench` commands
 
 ## Directory Structure
 
@@ -232,7 +301,7 @@ neorv32_tpu/
 │   └── npu_test/           — Standalone userspace NPU test (libc)
 ├── quartus/                — Quartus project
 ├── sim/                    — Verilog testbenches
-├── host/                   — Host-side boot script
+├── host/                   — Host-side boot + SD tools (boot_linux.py, boot_sd.py, sd_*.py)
 ├── output/                 — Build outputs (Image, DTB, stage2, initramfs)
 ├── neorv32_tpu.rbf         — Pre-built FPGA bitstream
 └── build_linux.sh          — Full build script

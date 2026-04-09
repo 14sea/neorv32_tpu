@@ -25,6 +25,13 @@
 	chosen {
 		bootargs = "earlycon=neorv32,0xfff50000 console=ttyNEO0,115200";
 		stdout-path = "serial0:115200n8";
+		/* Decoupled initramfs: stage2 scans the DTB for the sentinel
+		 * 0xC0DEDEAD and overwrites it with the real initrd end
+		 * address at boot time. initrd-start is fixed at
+		 * SDRAM+0x1F80000 (see memory map).
+		 */
+		linux,initrd-start = <0x41F80000>;
+		linux,initrd-end   = <0xC0DEDEAD>;
 	};
 
 	cpus {

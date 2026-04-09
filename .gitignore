@@ -45,3 +45,4 @@ sim/tb_*[!.v]
 *.bak
 *.swp
 *~
+tools/

@@ -1,7 +1,7 @@
 # Quartus Settings for NEORV32 + TPU — AX301 (EP4CE6F17C8)
 
 set_global_assignment -name FAMILY "Cyclone IV E"
-set_global_assignment -name DEVICE EP4CE6F17C8
+set_global_assignment -name DEVICE EP4CE10F17C8
 set_global_assignment -name TOP_LEVEL_ENTITY ax301_top
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.1
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "2026-04-04"
@@ -137,6 +137,12 @@ set_location_assignment PIN_R11 -to S_DB[15]
 set_instance_assignment -name CURRENT_STRENGTH_NEW 8MA -to S_*
 set_instance_assignment -name FAST_OUTPUT_REGISTER ON  -to S_*
 
+# SD card (SPI mode, AX301 on-board slot)
+set_location_assignment PIN_J15 -to SD_CLK
+set_location_assignment PIN_K16 -to SD_DI
+set_location_assignment PIN_J16 -to SD_DO
+set_location_assignment PIN_K15 -to SD_NCS
+
 # ── DSP: 15 of 16 PE multipliers on DSP via (* multstyle = "dsp" *) ──────────
 # pe_2_3 forced to LUT — last DSP block can't be placed on EP4CE6
 set_global_assignment -name AUTO_DSP_RECOGNITION ON
@@ -149,3 +155,9 @@ set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP "AS INPUT TRI-ST
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
 set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL
+
+# High-effort placement (tight LE budget with TPU + SPI on CE6 silicon)
+set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
+set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
+set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA

@@ -46,8 +46,10 @@ echo ""
 echo "=== Step 4: Configure and build kernel ==="
 cd "$LINUX_SRC"
 
-sed "s|__INITRAMFS_PATH__|$OUTPUT_DIR/neo_initramfs.cpio.gz|" \
-    "$PROJ_DIR/board/linux_defconfig" > arch/riscv/configs/neorv32_tpu_defconfig
+# Decoupled initramfs: defconfig uses CONFIG_INITRAMFS_SOURCE="" — kernel does NOT
+# embed initramfs. Stage2 loads Image+DTB+initrd from SD separately and patches the
+# DTB's linux,initrd-end sentinel (0xC0DEDEAD) at boot time.
+cp "$PROJ_DIR/board/linux_defconfig" arch/riscv/configs/neorv32_tpu_defconfig
 
 make ARCH=riscv CROSS_COMPILE=riscv-none-elf- neorv32_tpu_defconfig
 
