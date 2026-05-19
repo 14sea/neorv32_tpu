@@ -161,3 +161,15 @@ set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
 set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
+
+# ── Active Serial REMOTE update — application image at EPCS 0x80000 ─────────
+# Factory bitstream (neorv32_rot) lives at page 0 and uses the cycloneive_rublock
+# primitive to trigger reconfig into this TPU image at slot 1.  Both factory
+# and application images must be compiled with INTERNAL_FLASH_UPDATE_MODE=REMOTE
+# so the AS configuration controller honours the rublock-driven pgm_sel and
+# decodes the application image with the matching watchdog / page-select bits.
+# Quartus 21.1 uses CYCLONEIII_* assignment names for the Cyclone IV E family.
+set_global_assignment -name USE_CONFIGURATION_DEVICE ON
+set_global_assignment -name CYCLONEIII_CONFIGURATION_DEVICE EPCS16
+set_global_assignment -name CYCLONEIII_CONFIGURATION_SCHEME "ACTIVE SERIAL"
+set_global_assignment -name INTERNAL_FLASH_UPDATE_MODE "REMOTE"
