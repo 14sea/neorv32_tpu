@@ -46,3 +46,13 @@ sim/tb_*[!.v]
 *.swp
 *~
 tools/
+
+# Orchestrator state marker (rot_tpu_handoff make apply/unapply flow)
+.rot_tpu_handoff_applied
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Quartus auto-generated POF (auto-emitted next to .sof; reproducible)
+quartus/*.pof
